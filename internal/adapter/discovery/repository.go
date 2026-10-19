@@ -116,6 +116,9 @@ func (r *StaticEndpointRepository) UpdateEndpoint(ctx context.Context, endpoint 
 	existing.NextCheckTime = endpoint.NextCheckTime
 	existing.LastLatency = endpoint.LastLatency
 	existing.RateLimitedUntil = endpoint.RateLimitedUntil
+	existing.Drained = endpoint.Drained
+	existing.DrainedAt = endpoint.DrainedAt
+	existing.DrainReason = endpoint.DrainReason
 
 	return nil
 }

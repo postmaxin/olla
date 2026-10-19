@@ -890,6 +890,65 @@ func TestUpdateEndpoint_PersistsRateLimitedUntil(t *testing.T) {
 	}
 }
 
+// TestUpdateEndpoint_PersistsDrainState confirms that the drain flag set by
+// POST /internal/endpoints/{name}/drain survives UpdateEndpoint. The drain
+// fields were missing from the copy list (the same gap RateLimitedUntil once
+// had), so a drained endpoint stayed routable and kept receiving new sessions.
+func TestUpdateEndpoint_PersistsDrainState(t *testing.T) {
+	t.Parallel()
+
+	repo := NewStaticEndpointRepository()
+	cfg := []config.EndpointConfig{
+		{
+			Name:          "drain-endpoint",
+			URL:           "http://localhost:11434",
+			Type:          "ollama",
+			Priority:      ptrInt(100),
+			CheckInterval: 5 * time.Second,
+			CheckTimeout:  2 * time.Second,
+		},
+	}
+	if err := repo.LoadFromConfig(context.Background(), cfg); err != nil {
+		t.Fatalf("LoadFromConfig: %v", err)
+	}
+
+	eps, err := repo.GetAll(context.Background())
+	require.NoError(t, err, "GetAll before UpdateEndpoint")
+	ep := eps[0]
+
+	drainedAt := time.Now().Truncate(time.Millisecond)
+	ep.Drained = true
+	ep.DrainedAt = drainedAt
+	ep.DrainReason = "maintenance"
+
+	require.NoError(t, repo.UpdateEndpoint(context.Background(), ep), "UpdateEndpoint (drain)")
+
+	updated, err := repo.GetAll(context.Background())
+	require.NoError(t, err, "GetAll after drain")
+	if !updated[0].Drained {
+		t.Fatal("Drained was not persisted; endpoint is still routable after UpdateEndpoint")
+	}
+	if updated[0].RoutableNow() {
+		t.Error("RoutableNow() = true for a drained endpoint")
+	}
+	if !updated[0].DrainedAt.Equal(drainedAt) || updated[0].DrainReason != "maintenance" {
+		t.Errorf("drain metadata = (%v, %q), want (%v, %q)",
+			updated[0].DrainedAt, updated[0].DrainReason, drainedAt, "maintenance")
+	}
+
+	ep = updated[0]
+	ep.Drained = false
+	ep.DrainedAt = time.Time{}
+	ep.DrainReason = ""
+	require.NoError(t, repo.UpdateEndpoint(context.Background(), ep), "UpdateEndpoint (undrain)")
+
+	restored, err := repo.GetAll(context.Background())
+	require.NoError(t, err, "GetAll after undrain")
+	if restored[0].Drained {
+		t.Error("Drained still set after undrain")
+	}
+}
+
 // Userinfo rejection and its redacted-error coverage live in
 // repository_userinfo_test.go (TestEndpointConfigValidation_RejectsUserinfo,
 // TestEndpointConfigValidation_AcceptsPlainURL).
