@@ -131,6 +131,15 @@ type EndpointRepository interface {
 	Exists(ctx context.Context, endpointURL *url.URL) bool
 }
 
+// EndpointDrainer sets an endpoint's administrative drain state. It is kept
+// apart from EndpointRepository.UpdateEndpoint on purpose: health checks and
+// proxy status updates write back snapshots taken before their probe, and if
+// those writes carried the drain fields, a probe in flight during a drain or
+// undrain would restore the old value.
+type EndpointDrainer interface {
+	SetDrainState(ctx context.Context, endpointURL *url.URL, drained bool, reason string, at time.Time) error
+}
+
 type EndpointSelector interface {
 	Select(ctx context.Context, endpoints []*Endpoint) (*Endpoint, error)
 	Name() string
