@@ -53,17 +53,14 @@ func (a *Application) drainToggle(w http.ResponseWriter, r *http.Request, draine
 		reason = body.Reason
 	}
 
-	// Mutate the stored endpoint through UpdateEndpoint so LB + checker see it.
-	updated := *target
-	updated.Drained = drained
-	updated.DrainReason = reason
-	if drained {
-		updated.DrainedAt = time.Now()
-	} else {
-		updated.DrainedAt = time.Time{}
-		updated.DrainReason = ""
+	// Drain state has its own write path (domain.EndpointDrainer) so health
+	// checks writing back older snapshots through UpdateEndpoint cannot undo it.
+	drainer, ok := a.repository.(domain.EndpointDrainer)
+	if !ok {
+		http.Error(w, "endpoint repository does not support draining", http.StatusNotImplemented)
+		return
 	}
-	if err := a.repository.UpdateEndpoint(ctx, &updated); err != nil {
+	if err := drainer.SetDrainState(ctx, target.URL, drained, reason, time.Now()); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -76,6 +73,6 @@ func (a *Application) drainToggle(w http.ResponseWriter, r *http.Request, draine
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"endpoint": target.Name, "state": state, "reason": reason,
-		"status": string(updated.Status), "was_healthy": updated.Status == domain.StatusHealthy,
+		"status": string(target.Status), "was_healthy": target.Status == domain.StatusHealthy,
 	})
 }

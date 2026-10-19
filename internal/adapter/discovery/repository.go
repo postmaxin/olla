@@ -116,7 +116,35 @@ func (r *StaticEndpointRepository) UpdateEndpoint(ctx context.Context, endpoint 
 	existing.NextCheckTime = endpoint.NextCheckTime
 	existing.LastLatency = endpoint.LastLatency
 	existing.RateLimitedUntil = endpoint.RateLimitedUntil
+	// Drained/DrainedAt/DrainReason are deliberately not copied: they belong to
+	// SetDrainState. Callers here pass snapshots taken before a health probe, and
+	// copying drain state from them would undo a drain or undrain made meanwhile.
 
+	return nil
+}
+
+var _ domain.EndpointDrainer = (*StaticEndpointRepository)(nil)
+
+// SetDrainState records an administrative drain or undrain. It is the only
+// writer of the drain fields; see UpdateEndpoint.
+func (r *StaticEndpointRepository) SetDrainState(ctx context.Context, endpointURL *url.URL, drained bool, reason string, at time.Time) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	key := endpointURL.String()
+	existing, exists := r.endpoints[key]
+	if !exists {
+		return &domain.EndpointNotFoundError{URL: key}
+	}
+
+	existing.Drained = drained
+	if drained {
+		existing.DrainedAt = at
+		existing.DrainReason = reason
+	} else {
+		existing.DrainedAt = time.Time{}
+		existing.DrainReason = ""
+	}
 	return nil
 }
 

@@ -7,6 +7,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 	"github.com/thushan/olla/internal/config"
+	"github.com/thushan/olla/internal/core/domain"
 )
 
 // ptrInt is a test helper to construct *int literals inline.
@@ -888,6 +889,94 @@ func TestUpdateEndpoint_PersistsRateLimitedUntil(t *testing.T) {
 	if !updated[0].RateLimitedUntil.Equal(rateLimitDeadline) {
 		t.Errorf("RateLimitedUntil = %v, want %v", updated[0].RateLimitedUntil, rateLimitDeadline)
 	}
+}
+
+// loadDrainTestRepo returns a static repository holding one endpoint.
+func loadDrainTestRepo(t *testing.T) (*StaticEndpointRepository, *domain.Endpoint) {
+	t.Helper()
+	repo := NewStaticEndpointRepository()
+	cfg := []config.EndpointConfig{
+		{
+			Name:          "drain-endpoint",
+			URL:           "http://localhost:11434",
+			Type:          "ollama",
+			Priority:      ptrInt(100),
+			CheckInterval: 5 * time.Second,
+			CheckTimeout:  2 * time.Second,
+		},
+	}
+	require.NoError(t, repo.LoadFromConfig(context.Background(), cfg), "LoadFromConfig")
+	eps, err := repo.GetAll(context.Background())
+	require.NoError(t, err, "GetAll")
+	return repo, eps[0]
+}
+
+// TestSetDrainState_PersistsAndClears confirms SetDrainState records a drain
+// (making the endpoint non-routable) and that undraining clears it.
+func TestSetDrainState_PersistsAndClears(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	repo, ep := loadDrainTestRepo(t)
+
+	drainedAt := time.Now().Truncate(time.Millisecond)
+	require.NoError(t, repo.SetDrainState(ctx, ep.URL, true, "maintenance", drainedAt))
+
+	eps, err := repo.GetAll(ctx)
+	require.NoError(t, err)
+	require.True(t, eps[0].Drained, "endpoint should be drained")
+	require.False(t, eps[0].RoutableNow(), "drained endpoint must not be routable")
+	require.True(t, eps[0].DrainedAt.Equal(drainedAt))
+	require.Equal(t, "maintenance", eps[0].DrainReason)
+
+	require.NoError(t, repo.SetDrainState(ctx, ep.URL, false, "", time.Now()))
+	eps, err = repo.GetAll(ctx)
+	require.NoError(t, err)
+	require.False(t, eps[0].Drained, "endpoint should be back in rotation")
+	require.True(t, eps[0].DrainedAt.IsZero())
+	require.Empty(t, eps[0].DrainReason)
+}
+
+// TestUpdateEndpoint_StaleSnapshotCannotChangeDrainState covers a health check
+// that read the endpoint before a drain or undrain and writes it back after:
+// its snapshot carries the old drain state, which must not overwrite the new
+// one, while its health fields still apply.
+func TestUpdateEndpoint_StaleSnapshotCannotChangeDrainState(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	t.Run("drain during probe", func(t *testing.T) {
+		t.Parallel()
+		repo, snapshot := loadDrainTestRepo(t) // snapshot: Drained=false
+
+		require.NoError(t, repo.SetDrainState(ctx, snapshot.URL, true, "reclaim", time.Now()))
+
+		snapshot.Status = domain.StatusHealthy
+		require.NoError(t, repo.UpdateEndpoint(ctx, snapshot))
+
+		eps, err := repo.GetAll(ctx)
+		require.NoError(t, err)
+		require.True(t, eps[0].Drained, "stale health snapshot undid a drain")
+		require.Equal(t, domain.StatusHealthy, eps[0].Status, "health fields should still apply")
+	})
+
+	t.Run("undrain during probe", func(t *testing.T) {
+		t.Parallel()
+		repo, ep := loadDrainTestRepo(t)
+		require.NoError(t, repo.SetDrainState(ctx, ep.URL, true, "reclaim", time.Now()))
+
+		eps, err := repo.GetAll(ctx)
+		require.NoError(t, err)
+		snapshot := eps[0] // snapshot: Drained=true
+
+		require.NoError(t, repo.SetDrainState(ctx, snapshot.URL, false, "", time.Now()))
+
+		snapshot.Status = domain.StatusHealthy
+		require.NoError(t, repo.UpdateEndpoint(ctx, snapshot))
+
+		eps, err = repo.GetAll(ctx)
+		require.NoError(t, err)
+		require.False(t, eps[0].Drained, "stale health snapshot re-drained the endpoint")
+	})
 }
 
 // Userinfo rejection and its redacted-error coverage live in
